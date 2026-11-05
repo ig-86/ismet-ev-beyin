@@ -1,5 +1,5 @@
 name: "İsmet Ev Beyin"
-version: "0.2.0"
+version: "0.3.0"
 slug: "ismet_ev_beyin"
 description: "İsmet Ev Android uygulamasının evdeki beyni: Firebase üzerinden mesajları alır, Claude ile cevaplar, evi yönetir."
 url: "https://github.com/ig-86/ismet-ev-beyin"
@@ -15,6 +15,8 @@ map:
 options:
   servis_hesabi: ""
   sohbet_ajani: "conversation.claude_conversation"
+  takip_cihazi: "device_tracker.ev_indoor"
 schema:
   servis_hesabi: password
   sohbet_ajani: str
+  takip_cihazi: str
