@@ -35,7 +35,7 @@ from firebase_admin import credentials, firestore, messaging
 from google.cloud.firestore_v1.base_query import FieldFilter
 from PIL import Image
 
-SURUM = "0.4.4"
+SURUM = "0.4.5"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("beyin")
 
@@ -85,6 +85,7 @@ KAPI_KAMERA = "camera.koridor_kapi_kamera_hd_stream"
 SALON_KAMERA = "camera.salon_kamera_hd_stream"
 KAPI_ISIK = "light.koridor_kapi_kamera_floodlight_timed"
 SIREN = "siren.koridor_kapi_kamera_siren"
+ZIL_DUGME = "switch.zil_dugme"  # parmak robotu, click modunda bir kez basar
 # Raporda "evde biri var" sayılmayacak kişiler (kullanıcının kendisi ve sanal kişiler)
 RAPOR_HARIC_KISILER = {"person.igurler", "person.mqtt", "person.tablet"}
 # Görevlere eklenemeyecek riskli işler: bunlar her zaman parmak iziyle elle yapılır
@@ -572,6 +573,11 @@ def komut_gorev_iptal(istek):
     ref.delete()
     return {"metin": f"❌ Görev iptal edildi: {g.to_dict()['yapilacak']}"}
 
+def komut_zil(_):
+    """Zil düğmesindeki parmak robotuna bir kez bastırır (mod: click)."""
+    ha_servis("switch", "turn_on", {"entity_id": ZIL_DUGME})
+    return {"metin": f"🔔 Zil düğmesine basıldı ({simdi():%H:%M})."}
+
 def komut_beni_ara(_):
     if not AYAR["gemini_anahtari"]:
         return {"metin": "Sesli arama için eklenti ayarlarına Gemini anahtarı girilmemiş."}
@@ -579,7 +585,7 @@ def komut_beni_ara(_):
         "özetle ve başka bir isteği olup olmadığını sor.")
     return {"metin": "📞 Seni arıyorum…"}
 
-KOMUTLAR = {"/beni_ara": komut_beni_ara, "/kapi": komut_kapi, "/salon": komut_salon, "/isik": komut_isik, "/siren": komut_siren,
+KOMUTLAR = {"/zil": komut_zil, "/beni_ara": komut_beni_ara, "/kapi": komut_kapi, "/salon": komut_salon, "/isik": komut_isik, "/siren": komut_siren,
             "/siren_kapat": komut_siren_kapat, "/yeni": komut_yeni_sohbet, "/rapor": komut_rapor,
             "/hepsini_kapat": komut_hepsini_kapat, "/kalsin": komut_kalsin, "/gorevler": komut_gorevler,
             "/gorev_iptal": komut_gorev_iptal}
