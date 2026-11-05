@@ -35,7 +35,7 @@ from firebase_admin import credentials, firestore, messaging
 from google.cloud.firestore_v1.base_query import FieldFilter
 from PIL import Image
 
-SURUM = "0.4.1"
+SURUM = "0.4.2"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("beyin")
 
@@ -394,6 +394,10 @@ def arama_kurulumu(gelen, baglam=None):
         talimat += ("\nBU ARAMAYI SEN BAŞLATTIN. İsmet telefonu açınca ilk cümlen tam olarak şu olsun: "
                     "'İsmet abi merhaba, ben İsmet Ev'den arıyorum.' Ardından hiç beklemeden konuya gir. "
                     f"Konuşma boyunca ona 'İsmet abi' diye hitap edebilirsin. Konu: {baglam}")
+    else:
+        talimat += ("\nİsmet seni aradı. Hat bağlanınca ilk cümlen tam olarak şu olsun: "
+                    "'Buyur İsmet abi, nasıl yardımcı olabilirim?' Sonra onu dinle. "
+                    "Konuşma boyunca ona 'İsmet abi' diye hitap edebilirsin.")
     return {
         "model": "models/" + AYAR["gemini_model"],
         "generationConfig": {"responseModalities": ["AUDIO"],
@@ -408,7 +412,9 @@ def arama_hazirla(belge):
     """Telefon 'Evi ara' dedi: anahtar + oturum ayarı hazırla."""
     try:
         belge.reference.update({"durum": "hazir", "token": gemini_token(),
-                                "kurulum": json.dumps(arama_kurulumu(gelen=False), ensure_ascii=False)})
+                                "kurulum": json.dumps(arama_kurulumu(gelen=False), ensure_ascii=False),
+                                # Hat bağlanınca telefon bunu gönderir; İsmet Ev ilk sözü kendisi söyler
+                                "acilis": "(İsmet seni aradı ve hat bağlandı. Onu selamla.)"})
     except Exception as e:  # noqa: BLE001
         log.exception("arama hazırlanamadı")
         belge.reference.update({"durum": "hata", "hata": str(e)})
@@ -417,7 +423,8 @@ def ara(baslik, baglam):
     """Ev İsmet'i arar: telefona 'gelen arama' bildirimi gönderir."""
     _, ref = ARAMALAR.add({
         "yon": "gelen", "durum": "caliyor", "baslik": baslik, "zaman": time.time(),
-        "token": gemini_token(), "kurulum": json.dumps(arama_kurulumu(True, baglam), ensure_ascii=False)})
+        "token": gemini_token(), "kurulum": json.dumps(arama_kurulumu(True, baglam), ensure_ascii=False),
+        "acilis": "(İsmet telefonu açtı. Konuşmaya sen başla.)"})
     log.info("arama başlatıldı %s: %s", ref.id, baslik)
     for jeton in [d.id for d in CIHAZLAR.stream()]:
         try:
