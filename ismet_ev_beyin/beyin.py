@@ -35,7 +35,7 @@ from firebase_admin import credentials, firestore, messaging
 from google.cloud.firestore_v1.base_query import FieldFilter
 from PIL import Image
 
-SURUM = "0.4.0"
+SURUM = "0.4.1"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("beyin")
 
@@ -391,8 +391,9 @@ def arama_kurulumu(gelen, baglam=None):
         "İsmet vedalaşınca kısa bir vedadan sonra aramayi_bitir aracını çağır."
     )
     if gelen:
-        talimat += ("\nBU ARAMAYI SEN BAŞLATTIN. İsmet telefonu açınca 'Alo İsmet, ben İsmet Ev' gibi kısa bir "
-                    f"girişle hemen konuya gir. Konu: {baglam}")
+        talimat += ("\nBU ARAMAYI SEN BAŞLATTIN. İsmet telefonu açınca ilk cümlen tam olarak şu olsun: "
+                    "'İsmet abi merhaba, ben İsmet Ev'den arıyorum.' Ardından hiç beklemeden konuya gir. "
+                    f"Konuşma boyunca ona 'İsmet abi' diye hitap edebilirsin. Konu: {baglam}")
     return {
         "model": "models/" + AYAR["gemini_model"],
         "generationConfig": {"responseModalities": ["AUDIO"],
