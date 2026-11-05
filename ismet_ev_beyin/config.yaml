@@ -1,0 +1,18 @@
+name: "İsmet Ev Beyin"
+version: "0.1.0"
+slug: "ismet_ev_beyin"
+description: "İsmet Ev Android uygulamasının evdeki beyni: Firebase üzerinden mesajları alır, Claude ile cevaplar, evi yönetir."
+url: "https://github.com/ig-86/ismet-ev-beyin"
+arch:
+  - aarch64
+  - amd64
+init: false
+startup: application
+boot: auto
+homeassistant_api: true
+options:
+  servis_hesabi: ""
+  sohbet_ajani: "conversation.claude_conversation"
+schema:
+  servis_hesabi: password
+  sohbet_ajani: str
