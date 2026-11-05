@@ -1,5 +1,5 @@
 name: "İsmet Ev Beyin"
-version: "0.1.0"
+version: "0.1.1"
 slug: "ismet_ev_beyin"
 description: "İsmet Ev Android uygulamasının evdeki beyni: Firebase üzerinden mesajları alır, Claude ile cevaplar, evi yönetir."
 url: "https://github.com/ig-86/ismet-ev-beyin"

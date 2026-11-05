@@ -24,7 +24,7 @@ from firebase_admin import credentials, firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 from PIL import Image
 
-SURUM = "0.1.0"
+SURUM = "0.1.1"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("beyin")
 
