@@ -35,7 +35,7 @@ from firebase_admin import credentials, firestore, messaging
 from google.cloud.firestore_v1.base_query import FieldFilter
 from PIL import Image
 
-SURUM = "0.3.0"
+SURUM = "0.3.1"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("beyin")
 
@@ -218,7 +218,7 @@ def ev_taramasi():
             t["kisiler"].append((e, ad(s)))
     return t
 
-def rapor_gonder(sebep="cikis"):
+def rapor_gonder(sebep="cikis", cevap_verilen=None):
     t = ev_taramasi()
     kapatilabilir = [e for e, _ in t["isiklar"] + t["klimalar"] + t["medya"]]
     DURUM.document("rapor").set({"kapatilabilir": kapatilabilir, "zaman": time.time()})
@@ -236,6 +236,8 @@ def rapor_gonder(sebep="cikis"):
     )
     metin = claude_sor(istem, sohbet="yeni")
     mesaj = {"metin": metin, "baslik": "🏠 Ev raporu", "sesli": True}
+    if cevap_verilen:
+        mesaj["cevap_verilen"] = cevap_verilen
     if kapatilabilir and not t["kisiler"]:
         mesaj["butonlar"] = [{"etiket": "💡 Hepsini kapat", "komut": "/hepsini_kapat"},
                              {"etiket": "👍 Kalsın", "komut": "/kalsin"}]
@@ -283,8 +285,12 @@ def gorev_calistir(belge):
     log.info("görev çalışıyor %s: %s", belge.id, g["yapilacak"])
     try:
         sonuc = claude_sor(
-            f"[ZAMANLANMIŞ GÖREV — İsmet bunu daha önce istedi, şimdi zamanı geldi] Şunu yap: {g['yapilacak']}. "
-            "Yaptıktan sonra ne yaptığını İsmet'e tek kısa cümleyle söyle.", sohbet="ayri")
+            f"[ZAMANLANMIŞ GÖREV — İsmet bunu daha önce istedi, şimdi zamanı geldi] Görev: {g['yapilacak']}\n"
+            "Cevabın doğrudan İsmet'in telefonuna bildirim olarak gidecek. "
+            "Görev bir hatırlatmaysa hiçbir araç kullanma; hatırlatmayı doğrudan ona söyle "
+            "(ör. 'Su içme vakti geldi, bir bardak su iç!'). "
+            "Görev bir cihaz işiyse şimdi yap ve ne yaptığını tek kısa cümleyle söyle. "
+            "Bildirim ya da mesaj gönderme araçlarını kullanma.", sohbet="ayri")
         metin = f"⏰ {sonuc}"
     except Exception as e:  # noqa: BLE001
         log.exception("görev hatası")
@@ -337,8 +343,8 @@ def komut_yeni_sohbet(_):
     DURUM.document("sohbet").delete()
     return {"metin": "🧹 Yeni sohbet başladı, önceki konuşmayı unuttum."}
 
-def komut_rapor(_):
-    rapor_gonder(sebep="istek")
+def komut_rapor(istek):
+    rapor_gonder(sebep="istek", cevap_verilen=istek.get("_id"))
     return None  # cevabı rapor_gonder kendisi yazdı
 
 def komut_hepsini_kapat(_):
@@ -388,6 +394,7 @@ is_kuyrugu = queue.Queue()
 
 def isle(belge):
     veri = belge.to_dict() or {}
+    veri["_id"] = belge.id
     metin = (veri.get("metin") or "").strip()
     log.info("mesaj %s: %s", belge.id, metin[:80])
     try:
