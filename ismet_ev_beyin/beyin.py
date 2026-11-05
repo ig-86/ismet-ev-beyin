@@ -35,7 +35,7 @@ from firebase_admin import credentials, firestore, messaging
 from google.cloud.firestore_v1.base_query import FieldFilter
 from PIL import Image
 
-SURUM = "0.4.2"
+SURUM = "0.4.3"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("beyin")
 
@@ -388,7 +388,11 @@ def arama_kurulumu(gelen, baglam=None):
         f"Şu an saat {simdi():%H:%M}. Evin az önceki durumu: {ev_ozeti()}\n"
         "Cihaz açma/kapama ya da güncel durum için ev_komutu aracını kullan. İleri zamanlı işler için gorev_kur. "
         "Siren, alarm ve kilit işleri telefonda yapılamaz; bunların uygulamadan parmak iziyle yapılması gerektiğini söyle. "
-        "İsmet vedalaşınca kısa bir vedadan sonra aramayi_bitir aracını çağır."
+        "aramayi_bitir aracını YALNIZCA İsmet açıkça vedalaştıktan sonra (hoşça kal, görüşürüz, kapat gibi), "
+        "kısa bir vedadan sonra çağır. Söyleyeceğin şeyi söylemeden ve İsmet'in cevabını duymadan asla çağırma.\n"
+        "Bir işi bir kez yaptıysan ya da görevi bir kez kurduysan tekrarlama; aynı şeyi tekrar tekrar söyleme. "
+        "Anlamsız, yarım ya da senin az önce söylediğin cümleye benzeyen bir şey duyarsan bu büyük ihtimalle "
+        "hattaki yankıdır: cevap verme, sessizce bekle."
     )
     if gelen:
         talimat += ("\nBU ARAMAYI SEN BAŞLATTIN. İsmet telefonu açınca ilk cümlen tam olarak şu olsun: "
@@ -404,6 +408,12 @@ def arama_kurulumu(gelen, baglam=None):
                              "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": AYAR["ses"]}}}},
         "systemInstruction": {"parts": [{"text": talimat}]},
         "tools": [{"functionDeclarations": ARAMA_ARACLARI}],
+        # Konuşma algılamayı daha az hassas yap: uzaktaki yankı ve gürültü "İsmet konuştu" sayılmasın
+        "realtimeInputConfig": {"automaticActivityDetection": {
+            "startOfSpeechSensitivity": "START_SENSITIVITY_LOW",
+            "endOfSpeechSensitivity": "END_SENSITIVITY_LOW",
+            "prefixPaddingMs": 200,
+            "silenceDurationMs": 800}},
         "inputAudioTranscription": {},
         "outputAudioTranscription": {},
     }
