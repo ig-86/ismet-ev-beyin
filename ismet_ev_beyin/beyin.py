@@ -35,7 +35,7 @@ from firebase_admin import credentials, firestore, messaging
 from google.cloud.firestore_v1.base_query import FieldFilter
 from PIL import Image
 
-SURUM = "0.3.1"
+SURUM = "0.4.0"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("beyin")
 
@@ -61,6 +61,11 @@ def ayarlari_oku():
         "ha_token": os.environ.get("HA_TOKEN") or os.environ.get("SUPERVISOR_TOKEN"),
         # HA config klasörü eklentide /homeassistant olarak bağlı; bilgisayarda test ederken yok
         "config_kok": os.environ.get("HA_CONFIG_KOK", "/homeassistant"),
+        # Sesli arama (Gemini Live)
+        "gemini_anahtari": secenek.get("gemini_anahtari") or os.environ.get("GEMINI_ANAHTARI", ""),
+        "gemini_model": secenek.get("gemini_model") or "gemini-3.8-live",
+        "ses": secenek.get("ses") or "Charon",
+        "cikista_ara": secenek.get("cikista_ara", True),
     }
 
 AYAR = ayarlari_oku()
@@ -73,6 +78,8 @@ MESAJLAR = db.collection("mesajlar")
 DURUM = db.collection("durum")
 CIHAZLAR = db.collection("cihazlar")
 GOREVLER = db.collection("gorevler")
+ARAMALAR = db.collection("aramalar")
+ARAC_ISTEKLERI = db.collection("arac_istekleri")
 
 KAPI_KAMERA = "camera.koridor_kapi_kamera_hd_stream"
 SALON_KAMERA = "camera.salon_kamera_hd_stream"
@@ -238,10 +245,17 @@ def rapor_gonder(sebep="cikis", cevap_verilen=None):
     mesaj = {"metin": metin, "baslik": "🏠 Ev raporu", "sesli": True}
     if cevap_verilen:
         mesaj["cevap_verilen"] = cevap_verilen
-    if kapatilabilir and not t["kisiler"]:
+    sorulacak = bool(kapatilabilir and not t["kisiler"])
+    if sorulacak:
         mesaj["butonlar"] = [{"etiket": "💡 Hepsini kapat", "komut": "/hepsini_kapat"},
                              {"etiket": "👍 Kalsın", "komut": "/kalsin"}]
-    ev_mesaji(mesaj, bildirim={"baslik": "🏠 Ev raporu", "kanal": "genel"})
+    # Evden çıkışta sorulacak bir şey varsa telefonla ara; yoksa (ya da arama kapalıysa) bildirim yeter
+    if sebep == "cikis" and sorulacak and AYAR["cikista_ara"] and AYAR["gemini_anahtari"]:
+        ev_mesaji(mesaj)
+        ara("Evden çıkış raporu", f"İsmet az önce evden çıktı. Ona şunu anlat ve sor: {metin}\n"
+            f"Kapatmamı isterse hepsini_kapat aracını çağır; bir kısmını isterse ev_komutu ile sadece onları kapat.")
+    else:
+        ev_mesaji(mesaj, bildirim={"baslik": "🏠 Ev raporu", "kanal": "genel"})
     log.info("ev raporu gönderildi (%s), kapatılabilir: %d", sebep, len(kapatilabilir))
 
 # ---------------------------------------------------------------- görevler
@@ -265,20 +279,27 @@ def saat_yazisi(ts):
     gun = "" if z.date() == simdi().date() else "yarın "
     return f"{gun}{z:%H:%M}"
 
+def evet_mi(deger, varsayilan):
+    if deger in (None, ""):
+        return varsayilan
+    return str(deger).lower() not in ("false", "0", "hayır", "no")
+
 def gorev_kur(veri):
+    """Görevi kaydeder; sohbete onay mesajı yazar ve kısa açıklamasını döndürür."""
     yapilacak = (veri.get("yapilacak") or "").strip()
     if not yapilacak:
         raise ValueError("Görevde ne yapılacağı boş.")
     if RISKLI.search(yapilacak):
-        ev_mesaji({"metin": "🔒 Siren, alarm ve kilit gibi işler göreve eklenemez; bunları her seferinde parmak izinle sen yaparsın."})
-        return
+        metin = "Siren, alarm ve kilit gibi işler göreve eklenemez; bunları her seferinde parmak izinle sen yaparsın."
+        ev_mesaji({"metin": "🔒 " + metin})
+        return metin
     ts = gorev_zamani(veri)
-    haber = str(veri.get("haber_ver", True)).lower() not in ("false", "0", "hayır", "no")
-    _, ref = GOREVLER.add({"yapilacak": yapilacak, "zaman": ts, "haber_ver": haber, "durum": "bekliyor",
-                           "olusturma": time.time()})
+    _, ref = GOREVLER.add({"yapilacak": yapilacak, "zaman": ts, "haber_ver": evet_mi(veri.get("haber_ver"), True),
+                           "ara": evet_mi(veri.get("ara"), False), "durum": "bekliyor", "olusturma": time.time()})
     log.info("görev kuruldu %s: %s @ %s", ref.id, yapilacak, saat_yazisi(ts))
     ev_mesaji({"metin": f"📋 Görev kuruldu: {saat_yazisi(ts)} — {yapilacak}",
                "butonlar": [{"etiket": "❌ İptal", "komut": f"/gorev_iptal {ref.id}"}]})
+    return f"Görev kuruldu: {saat_yazisi(ts)} — {yapilacak}"
 
 def gorev_calistir(belge):
     g = belge.to_dict()
@@ -295,7 +316,10 @@ def gorev_calistir(belge):
     except Exception as e:  # noqa: BLE001
         log.exception("görev hatası")
         metin = f"⚠️ Görev yapılamadı ({g['yapilacak']}): {e}"
-    if g.get("haber_ver", True):
+    if g.get("ara") and AYAR["gemini_anahtari"]:
+        ev_mesaji({"metin": metin})
+        ara("Görev", f"Daha önce kurduğu görevin zamanı geldi ve yapıldı. Ona kısaca şunu söyle: {metin.lstrip('⏰ ')}")
+    elif g.get("haber_ver", True):
         ev_mesaji({"metin": metin, "sesli": True}, bildirim={"baslik": "⏰ Görev tamam", "kanal": "genel"})
     else:
         ev_mesaji({"metin": metin})
@@ -311,6 +335,151 @@ def gorev_zamanlayici():
         except Exception:  # noqa: BLE001
             log.exception("zamanlayıcı hatası")
         time.sleep(10)
+
+# ---------------------------------------------------------------- sesli arama (Gemini Live)
+# Telefon sesi doğrudan Gemini'ye akıtır; beyin yalnızca tek kullanımlık anahtar + oturum ayarını
+# hazırlar ve görüşme sırasında Gemini'nin istediği ev işlerini (araçları) yapar.
+ARAMA_ARACLARI = [
+    {"name": "ev_komutu",
+     "description": "Evdeki cihazları kontrol et ya da durumlarını sor (ışık, klima, TV, sensörler, kameralar...). "
+                    "İsmet'in isteğini açık bir Türkçe cümle olarak ver. Sonuç birkaç saniye sürebilir; "
+                    "beklerken 'hemen bakıyorum' gibi kısa bir şey söyle.",
+     "parameters": {"type": "OBJECT", "properties": {
+         "istek": {"type": "STRING", "description": "Örn: 'salon ışığını kapat', 'klima kaç derecede?'"}},
+         "required": ["istek"]}},
+    {"name": "gorev_kur",
+     "description": "İleride yapılacak bir iş için görev kur (ör. '1 saat sonra klimayı kapat', '23:00'te ışıkları kapat'). "
+                    "dakika_sonra ya da saat'ten birini ver. İsmet iş bitince aranmak isterse ara=true.",
+     "parameters": {"type": "OBJECT", "properties": {
+         "yapilacak": {"type": "STRING", "description": "Zamanı gelince yapılacak iş"},
+         "dakika_sonra": {"type": "NUMBER", "description": "Kaç dakika sonra"},
+         "saat": {"type": "STRING", "description": "HH:MM (24 saat)"},
+         "ara": {"type": "BOOLEAN", "description": "Bitince İsmet'i telefonla ara"}},
+         "required": ["yapilacak"]}},
+    {"name": "hepsini_kapat",
+     "description": "Ev raporunda açık kaldığı söylenen tüm ışık, klima ve TV'leri kapat.",
+     "parameters": {"type": "OBJECT", "properties": {}}},
+    {"name": "aramayi_bitir",
+     "description": "İsmet vedalaştığında (hoşça kal, görüşürüz, kapatabilirsin) kısa bir vedadan sonra aramayı kapat.",
+     "parameters": {"type": "OBJECT", "properties": {}}},
+]
+
+def gemini_token():
+    """Tek kullanımlık, kısa ömürlü Gemini Live anahtarı (asıl anahtar telefona hiç gitmez)."""
+    simdi_utc = dt.datetime.now(dt.timezone.utc)
+    z = lambda dk: (simdi_utc + dt.timedelta(minutes=dk)).isoformat().replace("+00:00", "Z")  # noqa: E731
+    r = requests.post("https://generativelanguage.googleapis.com/v1alpha/auth_tokens",
+                      params={"key": AYAR["gemini_anahtari"]},
+                      json={"uses": 1, "expireTime": z(30), "newSessionExpireTime": z(3)}, timeout=20)
+    r.raise_for_status()
+    return r.json()["name"]
+
+def ev_ozeti():
+    t = ev_taramasi()
+    liste = lambda k: ", ".join(n for _, n in t[k]) or "yok"  # noqa: E731
+    return (f"Açık ışıklar: {liste('isiklar')}. Çalışan klima/termostat: {liste('klimalar')}. "
+            f"Açık TV/medya: {liste('medya')}. Hareket algılanan yerler: {liste('varlik')}. "
+            f"Evdeki diğer kişiler: {liste('kisiler')}.")
+
+def arama_kurulumu(gelen, baglam=None):
+    talimat = (
+        "Sen İsmet Ev'sin: İsmet'in evinin sesli asistanısın ve onunla telefonda konuşuyorsun. "
+        "Her zaman Türkçe konuş. Kısa (1-3 cümle), doğal ve samimi konuş; liste okuma, emoji söyleme. "
+        f"Şu an saat {simdi():%H:%M}. Evin az önceki durumu: {ev_ozeti()}\n"
+        "Cihaz açma/kapama ya da güncel durum için ev_komutu aracını kullan. İleri zamanlı işler için gorev_kur. "
+        "Siren, alarm ve kilit işleri telefonda yapılamaz; bunların uygulamadan parmak iziyle yapılması gerektiğini söyle. "
+        "İsmet vedalaşınca kısa bir vedadan sonra aramayi_bitir aracını çağır."
+    )
+    if gelen:
+        talimat += ("\nBU ARAMAYI SEN BAŞLATTIN. İsmet telefonu açınca 'Alo İsmet, ben İsmet Ev' gibi kısa bir "
+                    f"girişle hemen konuya gir. Konu: {baglam}")
+    return {
+        "model": "models/" + AYAR["gemini_model"],
+        "generationConfig": {"responseModalities": ["AUDIO"],
+                             "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": AYAR["ses"]}}}},
+        "systemInstruction": {"parts": [{"text": talimat}]},
+        "tools": [{"functionDeclarations": ARAMA_ARACLARI}],
+        "inputAudioTranscription": {},
+        "outputAudioTranscription": {},
+    }
+
+def arama_hazirla(belge):
+    """Telefon 'Evi ara' dedi: anahtar + oturum ayarı hazırla."""
+    try:
+        belge.reference.update({"durum": "hazir", "token": gemini_token(),
+                                "kurulum": json.dumps(arama_kurulumu(gelen=False), ensure_ascii=False)})
+    except Exception as e:  # noqa: BLE001
+        log.exception("arama hazırlanamadı")
+        belge.reference.update({"durum": "hata", "hata": str(e)})
+
+def ara(baslik, baglam):
+    """Ev İsmet'i arar: telefona 'gelen arama' bildirimi gönderir."""
+    _, ref = ARAMALAR.add({
+        "yon": "gelen", "durum": "caliyor", "baslik": baslik, "zaman": time.time(),
+        "token": gemini_token(), "kurulum": json.dumps(arama_kurulumu(True, baglam), ensure_ascii=False)})
+    log.info("arama başlatıldı %s: %s", ref.id, baslik)
+    for jeton in [d.id for d in CIHAZLAR.stream()]:
+        try:
+            messaging.send(messaging.Message(token=jeton, data={"tur": "arama", "arama_id": ref.id, "baslik": baslik},
+                                             android=messaging.AndroidConfig(priority="high", ttl=60)))
+        except Exception:  # noqa: BLE001
+            log.exception("arama bildirimi gönderilemedi")
+
+    def cevapsiz_kontrol():
+        time.sleep(50)
+        g = ref.get().to_dict() or {}
+        if g.get("durum") == "caliyor":
+            ref.update({"durum": "cevapsiz"})
+            ev_mesaji({"metin": f"📞 Cevapsız arama: {baslik}. Mesajı yukarıda bıraktım."},
+                      bildirim={"baslik": "📞 Cevapsız arama — İsmet Ev", "kanal": "genel"})
+    threading.Thread(target=cevapsiz_kontrol, daemon=True).start()
+
+def arac_calistir(belge):
+    """Görüşme sırasında Gemini'nin istediği ev işini yapar, sonucu telefona geri yazar."""
+    g = belge.to_dict() or {}
+    ad, args = g.get("ad"), g.get("args") or {}
+    log.info("arama aracı: %s %s", ad, args)
+    try:
+        if ad == "ev_komutu":
+            sonuc = claude_sor(f"[İsmet telefonda; cevabın sesli okunacak, 1-2 kısa cümle] {args.get('istek', '')}",
+                               sohbet="ayri")
+        elif ad == "gorev_kur":
+            sonuc = gorev_kur(args)
+        elif ad == "hepsini_kapat":
+            sonuc = komut_hepsini_kapat(None)["metin"]
+        else:
+            sonuc = f"Bilinmeyen araç: {ad}"
+    except Exception as e:  # noqa: BLE001
+        log.exception("arama aracı hatası")
+        sonuc = f"Yapılamadı: {e}"
+    belge.reference.update({"durum": "tamam", "sonuc": sonuc})
+
+def arama_kaydet(belge):
+    """Biten aramanın dökümünü sohbete yazar."""
+    g = belge.to_dict() or {}
+    belge.reference.update({"durum": "kayitli", "token": firestore.DELETE_FIELD})
+    sure = int(g.get("sure", 0))
+    satirlar = [f"{'Sen' if s.get('kim') == 'ben' else 'İsmet Ev'}: {s.get('metin', '').strip()}"
+                for s in g.get("dokum", []) if s.get("metin", "").strip()]
+    yon = "Gelen arama" if g.get("yon") == "gelen" else "Giden arama"
+    ev_mesaji({"metin": f"📞 {yon} — {sure // 60} dk {sure % 60} sn\n\n" + ("\n".join(satirlar) or "(konuşma kaydı yok)")})
+
+def arama_dinleyici(belgeler, degisiklikler, okuma_zamani):
+    for d in degisiklikler:
+        if d.type.name not in ("ADDED", "MODIFIED"):
+            continue
+        durum = (d.document.to_dict() or {}).get("durum")
+        if durum == "baslat":
+            d.document.reference.update({"durum": "hazirlaniyor"})
+            threading.Thread(target=arama_hazirla, args=(d.document,), daemon=True).start()
+        elif durum == "bitti":
+            threading.Thread(target=guvenli, args=(arama_kaydet, d.document), daemon=True).start()
+
+def arac_dinleyici(belgeler, degisiklikler, okuma_zamani):
+    for d in degisiklikler:
+        if d.type.name == "ADDED" and (d.document.to_dict() or {}).get("durum") == "yeni":
+            d.document.reference.update({"durum": "calisiyor"})
+            threading.Thread(target=arac_calistir, args=(d.document,), daemon=True).start()
 
 # ---------------------------------------------------------------- komutlar
 def komut_kapi(_):
@@ -384,7 +553,14 @@ def komut_gorev_iptal(istek):
     ref.delete()
     return {"metin": f"❌ Görev iptal edildi: {g.to_dict()['yapilacak']}"}
 
-KOMUTLAR = {"/kapi": komut_kapi, "/salon": komut_salon, "/isik": komut_isik, "/siren": komut_siren,
+def komut_beni_ara(_):
+    if not AYAR["gemini_anahtari"]:
+        return {"metin": "Sesli arama için eklenti ayarlarına Gemini anahtarı girilmemiş."}
+    ara("Deneme araması", "Bu bir deneme araması. İsmet'e aramanın çalıştığını söyle, evin durumunu bir cümleyle "
+        "özetle ve başka bir isteği olup olmadığını sor.")
+    return {"metin": "📞 Seni arıyorum…"}
+
+KOMUTLAR = {"/beni_ara": komut_beni_ara, "/kapi": komut_kapi, "/salon": komut_salon, "/isik": komut_isik, "/siren": komut_siren,
             "/siren_kapat": komut_siren_kapat, "/yeni": komut_yeni_sohbet, "/rapor": komut_rapor,
             "/hepsini_kapat": komut_hepsini_kapat, "/kalsin": komut_kalsin, "/gorevler": komut_gorevler,
             "/gorev_iptal": komut_gorev_iptal}
@@ -504,15 +680,22 @@ def main():
     ha_durum("sun.sun")  # HA erişimini baştan doğrula
     for hedef in (isci, kalp_atisi, ha_olay_dinleyici, gorev_zamanlayici):
         threading.Thread(target=hedef, daemon=True).start()
-    sorgu = MESAJLAR.where(filter=FieldFilter("kimden", "==", "ben")).where(filter=FieldFilter("durum", "==", "yeni"))
-    izleyici = None
+    dinlenenler = {
+        "mesajlar": (MESAJLAR.where(filter=FieldFilter("kimden", "==", "ben"))
+                     .where(filter=FieldFilter("durum", "==", "yeni")), dinleyici),
+        "aramalar": (ARAMALAR.where(filter=FieldFilter("durum", "in", ["baslat", "bitti"])), arama_dinleyici),
+        "arac_istekleri": (ARAC_ISTEKLERI.where(filter=FieldFilter("durum", "==", "yeni")), arac_dinleyici),
+    }
+    izleyiciler = {}
     while True:
         # Dinleyici koparsa yeniden kur
-        if izleyici is None or getattr(izleyici, "is_active", True) is False:
-            if izleyici is not None:
-                log.warning("dinleyici koptu, yeniden kuruluyor")
-            izleyici = sorgu.on_snapshot(dinleyici)
-            log.info("mesajlar dinleniyor")
+        for ad, (sorgu, geri_cagri) in dinlenenler.items():
+            iz = izleyiciler.get(ad)
+            if iz is None or getattr(iz, "is_active", True) is False:
+                if iz is not None:
+                    log.warning("%s dinleyicisi koptu, yeniden kuruluyor", ad)
+                izleyiciler[ad] = sorgu.on_snapshot(geri_cagri)
+                log.info("%s dinleniyor", ad)
         time.sleep(30)
 
 if __name__ == "__main__":
