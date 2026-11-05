@@ -35,7 +35,7 @@ from firebase_admin import credentials, firestore, messaging
 from google.cloud.firestore_v1.base_query import FieldFilter
 from PIL import Image
 
-SURUM = "0.4.3"
+SURUM = "0.4.4"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("beyin")
 
@@ -477,8 +477,9 @@ def arama_kaydet(belge):
     g = belge.to_dict() or {}
     belge.reference.update({"durum": "kayitli", "token": firestore.DELETE_FIELD})
     sure = int(g.get("sure", 0))
-    satirlar = [f"{'Sen' if s.get('kim') == 'ben' else 'İsmet Ev'}: {s.get('metin', '').strip()}"
-                for s in g.get("dokum", []) if s.get("metin", "").strip()]
+    temiz = lambda t: re.sub(r"\s+", " ", re.sub(r"<[^>]*>|\{[^}]*\}", "", t or "")).strip()  # <no speech>, {pause}
+    satirlar = [f"{'Sen' if s.get('kim') == 'ben' else 'İsmet Ev'}: {temiz(s.get('metin'))}"
+                for s in g.get("dokum", []) if temiz(s.get("metin"))]
     yon = "Gelen arama" if g.get("yon") == "gelen" else "Giden arama"
     ev_mesaji({"metin": f"📞 {yon} — {sure // 60} dk {sure % 60} sn\n\n" + ("\n".join(satirlar) or "(konuşma kaydı yok)")})
 
