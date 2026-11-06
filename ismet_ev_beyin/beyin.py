@@ -27,6 +27,7 @@ import queue
 import re
 import threading
 import time
+import wave
 from zoneinfo import ZoneInfo
 
 import firebase_admin
@@ -66,6 +67,8 @@ def ayarlari_oku():
         "gemini_anahtari": secenek.get("gemini_anahtari") or os.environ.get("GEMINI_ANAHTARI", ""),
         "gemini_model": secenek.get("gemini_model") or "gemini-3.8-live",
         "ses": secenek.get("ses") or "Charon",
+        # Hızlı komut cevaplarını aramadaki sesle okutmak için (Gemini seslendirme)
+        "tts_model": secenek.get("tts_model") or "gemini-3.8-flash-lite-tts",
         "cikista_ara": secenek.get("cikista_ara", True),
     }
 
@@ -76,6 +79,7 @@ HA.headers["Authorization"] = "Bearer " + AYAR["ha_token"]
 firebase_admin.initialize_app(credentials.Certificate(AYAR["sa"]))
 db = firestore.client()
 MESAJLAR = db.collection("mesajlar")
+SESLER = db.collection("sesler")  # sesli cevapların ses dosyaları (telefon çalınca siler)
 DURUM = db.collection("durum")
 CIHAZLAR = db.collection("cihazlar")
 GOREVLER = db.collection("gorevler")
@@ -647,6 +651,59 @@ KOMUTLAR = {"/zil": komut_zil, "/beni_ara": komut_beni_ara, "/kapi": komut_kapi,
             "/gorev_iptal": komut_gorev_iptal, "/duyuru": komut_duyuru, "/duyuru_ac": komut_duyuru_ac,
             "/duyuru_kapat": komut_duyuru_kapat}
 
+# ---------------------------------------------------------------- cevabı aramadaki sesle seslendirme
+SES_AZAMI_KARAKTER = 400      # daha uzun cevapları telefon kendi sesiyle okur
+SES_AZAMI_BAYT = 950_000      # Firestore belge sınırı 1 MB
+
+def _konusulacak(metin):
+    """Markdown işaretlerini ve emojileri at (ses motoru bunları okumasın)."""
+    t = re.sub(r"[*#_`>]", "", metin)
+    t = re.sub(r"[^\w\s.,!?;:'\"()%/+\-]", "", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+def seslendir(metin):
+    """Metni Gemini'nin seslendirme modeliyle aramadaki sesle WAV'a çevirir (olmazsa None)."""
+    govde = {"contents": [{"parts": [{"text": metin}]}],
+             "generationConfig": {"responseModalities": ["AUDIO"],
+                                  "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": AYAR["ses"]}}}}}
+    for model in dict.fromkeys([AYAR["tts_model"], "gemini-2.5-flash-preview-tts"]):
+        try:
+            r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                              params={"key": AYAR["gemini_anahtari"]}, json=govde, timeout=12)
+            if not r.ok:
+                log.warning("seslendirme %s: HTTP %s", model, r.status_code)
+                continue
+            parca = r.json()["candidates"][0]["content"]["parts"][0]["inlineData"]
+            veri = base64.b64decode(parca["data"])
+            tur = parca.get("mimeType", "").lower()
+            if "wav" not in tur:  # ham PCM (L16) geldiyse WAV başlığı ekle
+                hiz = int((re.search(r"rate=(\d+)", tur) or [None, "24000"])[1])
+                b = io.BytesIO()
+                with wave.open(b, "wb") as w:
+                    w.setnchannels(1); w.setsampwidth(2); w.setframerate(hiz); w.writeframes(veri)
+                veri = b.getvalue()
+            return veri
+        except Exception:  # noqa: BLE001
+            log.exception("seslendirme hatası (%s)", model)
+    return None
+
+def cevap_sesi(cevap_id, metin):
+    """Cevabın sesini sesler/{cevap_id} belgesine yazar; olmazsa 'yok' yazar ki telefon beklemesin."""
+    bas = time.time()
+    wav = seslendir(_konusulacak(metin))
+    if wav and len(wav) <= SES_AZAMI_BAYT:
+        SESLER.document(cevap_id).set({"ses": wav, "zaman": firestore.SERVER_TIMESTAMP})
+        log.info("cevap sesi hazır: %.1f sn, %d KB", time.time() - bas, len(wav) // 1024)
+    else:
+        SESLER.document(cevap_id).set({"yok": True, "zaman": firestore.SERVER_TIMESTAMP})
+    # Çalınmadan kalmış eski sesleri temizle
+    try:
+        esik = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)
+        for b in SESLER.where(filter=FieldFilter("zaman", "<", esik)).limit(20).stream():
+            b.reference.delete()
+    except Exception:  # noqa: BLE001
+        log.exception("eski ses temizliği")
+
 # ---------------------------------------------------------------- mesaj işleyici
 is_kuyrugu = queue.Queue()
 # Cevap verilmiş mesaj kimlikleri: telefonun bağlantısı takılınca aynı yazmayı tekrar gönderip
@@ -679,7 +736,14 @@ def isle(belge):
     if cevap is not None:
         cevap.setdefault("sesli", bool(veri.get("sesli")))
         cevap["cevap_verilen"] = belge.id
-        ev_mesaji(cevap)
+        # Sesli sorulduysa cevabı aramadaki sesle de hazırla (yazı hemen gider, ses arkasından gelir)
+        ses_yap = bool(cevap.get("sesli") and AYAR["gemini_anahtari"] and cevap.get("metin")
+                       and len(cevap["metin"]) <= SES_AZAMI_KARAKTER)
+        if ses_yap:
+            cevap["ses_hazirlaniyor"] = True
+        cevap_id = ev_mesaji(cevap)
+        if ses_yap:
+            threading.Thread(target=cevap_sesi, args=(cevap_id, cevap["metin"]), daemon=True).start()
     guncelle = {"durum": durum}
     if veri.get("ses"):
         guncelle["ses"] = firestore.DELETE_FIELD  # ses kaydı Nest'e gitti; sohbet geçmişini şişirmesin
