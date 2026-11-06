@@ -22,6 +22,7 @@ import io
 import json
 import logging
 import os
+import collections
 import queue
 import re
 import threading
@@ -648,6 +649,9 @@ KOMUTLAR = {"/zil": komut_zil, "/beni_ara": komut_beni_ara, "/kapi": komut_kapi,
 
 # ---------------------------------------------------------------- mesaj işleyici
 is_kuyrugu = queue.Queue()
+# Cevap verilmiş mesaj kimlikleri: telefonun bağlantısı takılınca aynı yazmayı tekrar gönderip
+# durumu yine "yeni" yapabiliyor; aynı komut iki kez çalışmasın
+cevaplananlar = collections.deque(maxlen=500)
 
 def isle(belge):
     veri = belge.to_dict() or {}
@@ -688,6 +692,11 @@ def isci():
             # Aynı belge iki kez kuyruğa girmiş olabilir; hâlâ yeni mi kontrol et
             guncel = belge.reference.get()
             if (guncel.to_dict() or {}).get("durum") == "yeni":
+                if guncel.id in cevaplananlar:
+                    log.info("mesaj %s tekrar geldi, atlandı", guncel.id)
+                    guncel.reference.update({"durum": "tamam"})
+                    continue
+                cevaplananlar.append(guncel.id)
                 isle(guncel)
         except Exception:  # noqa: BLE001
             log.exception("işçi hatası")
