@@ -35,7 +35,7 @@ from firebase_admin import credentials, firestore, messaging
 from google.cloud.firestore_v1.base_query import FieldFilter
 from PIL import Image
 
-SURUM = "0.4.5"
+SURUM = "0.5.0"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("beyin")
 
@@ -86,6 +86,12 @@ SALON_KAMERA = "camera.salon_kamera_hd_stream"
 KAPI_ISIK = "light.koridor_kapi_kamera_floodlight_timed"
 SIREN = "siren.koridor_kapi_kamera_siren"
 ZIL_DUGME = "switch.zil_dugme"  # parmak robotu, click modunda bir kez basar
+# Duyuru modu: açıkken yazılanlar salondaki Nest'te okunur, sesli mesajlar aynen çalınır (Telegram'daki gibi)
+NEST = "media_player.living_room"
+DUYURU_TTS = "tts.google_ai_tts_2"
+DUYURU_SURE_DK = 30
+DUYURU_KLASOR = "/media/ismetev"  # eklentide media:rw; HA'da media-source://media_source/local/ismetev/
+DUYURU_KAPAT_BUTON = [{"etiket": "🔕 Duyuru modunu kapat", "komut": "/duyuru_kapat"}]
 # Raporda "evde biri var" sayılmayacak kişiler (kullanıcının kendisi ve sanal kişiler)
 RAPOR_HARIC_KISILER = {"person.igurler", "person.mqtt", "person.tablet"}
 # Görevlere eklenemeyecek riskli işler: bunlar her zaman parmak iziyle elle yapılır
@@ -578,6 +584,55 @@ def komut_zil(_):
     ha_servis("switch", "turn_on", {"entity_id": ZIL_DUGME})
     return {"metin": f"🔔 Zil düğmesine basıldı ({simdi():%H:%M})."}
 
+# ---------------------------------------------------------------- duyuru modu
+def duyuru_acik():
+    d = DURUM.document("duyuru").get().to_dict() or {}
+    return bool(d.get("acik")) and d.get("bitis") is not None and d["bitis"] > dt.datetime.now(dt.timezone.utc)
+
+def komut_duyuru_ac(_):
+    bitis = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=DUYURU_SURE_DK)
+    DURUM.document("duyuru").set({"acik": True, "bitis": bitis})
+    return {"metin": f"📢 Duyuru modu AÇIK ({DUYURU_SURE_DK} dk). Yazdığın şey salondaki Nest'te okunur, "
+                     "mikrofonla kaydettiğin ses aynen çalınır. Bu sürede mesajların Claude'a gitmez.",
+            "butonlar": DUYURU_KAPAT_BUTON, "sesli": False}
+
+def komut_duyuru_kapat(_):
+    DURUM.document("duyuru").set({"acik": False, "bitis": None})
+    return {"metin": "🔕 Duyuru modu kapandı. Mesajların yine Claude'a gidiyor.", "sesli": False}
+
+def komut_duyuru(_):
+    return komut_duyuru_kapat(None) if duyuru_acik() else komut_duyuru_ac(None)
+
+def duyuru_yap(veri):
+    """Duyuru modunda gelen mesajı Nest'e verir: ses varsa aynen çalar, yoksa yazıyı okutur."""
+    ses = veri.get("ses")
+    if ses:
+        os.makedirs(DUYURU_KLASOR, exist_ok=True)
+        uzanti = veri.get("ses_tur") or "ogg"
+        dosya = f"duyuru_{veri['_id']}.{uzanti}"
+        with open(os.path.join(DUYURU_KLASOR, dosya), "wb") as f:
+            f.write(base64.b64decode(ses))
+        ha_servis("media_player", "play_media", {
+            "entity_id": NEST, "announce": True,
+            "media_content_id": f"media-source://media_source/local/ismetev/{dosya}",
+            "media_content_type": "audio/ogg" if uzanti == "ogg" else "audio/mp4"})
+        eski = sorted(f for f in os.listdir(DUYURU_KLASOR) if f.startswith("duyuru_"))
+        for f in eski[:-20]:  # son 20 kaydı tut
+            try:
+                os.remove(os.path.join(DUYURU_KLASOR, f))
+            except OSError:
+                pass
+        return {"metin": "📢 Sesli mesajın Nest'te çalındı.", "butonlar": DUYURU_KAPAT_BUTON, "sesli": False}
+    ha_servis("tts", "speak", {"entity_id": DUYURU_TTS, "media_player_entity_id": NEST, "message": veri["metin"]})
+    return {"metin": "📢 Nest'te okundu.", "butonlar": DUYURU_KAPAT_BUTON, "sesli": False}
+
+def duyuru_zaman_asimi():
+    d = DURUM.document("duyuru").get().to_dict() or {}
+    if d.get("acik") and d.get("bitis") is not None and d["bitis"] <= dt.datetime.now(dt.timezone.utc):
+        DURUM.document("duyuru").set({"acik": False, "bitis": None})
+        ev_mesaji({"metin": f"📢 Duyuru modu {DUYURU_SURE_DK} dakika dolduğu için kapandı. Mesajların yine Claude'a gidiyor.",
+                   "butonlar": [{"etiket": "📢 Tekrar aç", "komut": "/duyuru_ac"}]})
+
 def komut_beni_ara(_):
     if not AYAR["gemini_anahtari"]:
         return {"metin": "Sesli arama için eklenti ayarlarına Gemini anahtarı girilmemiş."}
@@ -588,7 +643,8 @@ def komut_beni_ara(_):
 KOMUTLAR = {"/zil": komut_zil, "/beni_ara": komut_beni_ara, "/kapi": komut_kapi, "/salon": komut_salon, "/isik": komut_isik, "/siren": komut_siren,
             "/siren_kapat": komut_siren_kapat, "/yeni": komut_yeni_sohbet, "/rapor": komut_rapor,
             "/hepsini_kapat": komut_hepsini_kapat, "/kalsin": komut_kalsin, "/gorevler": komut_gorevler,
-            "/gorev_iptal": komut_gorev_iptal}
+            "/gorev_iptal": komut_gorev_iptal, "/duyuru": komut_duyuru, "/duyuru_ac": komut_duyuru_ac,
+            "/duyuru_kapat": komut_duyuru_kapat}
 
 # ---------------------------------------------------------------- mesaj işleyici
 is_kuyrugu = queue.Queue()
@@ -599,11 +655,16 @@ def isle(belge):
     metin = (veri.get("metin") or "").strip()
     log.info("mesaj %s: %s", belge.id, metin[:80])
     try:
-        if not metin:
-            cevap = {"metin": "Boş mesaj geldi."}
-        elif metin.startswith("/"):
+        if metin.startswith("/"):
             f = KOMUTLAR.get(metin.split()[0].lower())
             cevap = f(veri) if f else {"metin": "Bu komutu bilmiyorum: " + metin}
+        elif (metin or veri.get("ses")) and duyuru_acik():
+            cevap = duyuru_yap(veri)
+        elif veri.get("ses"):
+            cevap = {"metin": "🎤 Sesli kayıt yalnız duyuru modunda Nest'e gider; duyuru modu kapalı.",
+                     "butonlar": [{"etiket": "📢 Duyuru modunu aç", "komut": "/duyuru_ac"}], "sesli": False}
+        elif not metin:
+            cevap = {"metin": "Boş mesaj geldi."}
         else:
             cevap = {"metin": claude_sor(metin)}
         durum = "tamam"
@@ -615,7 +676,10 @@ def isle(belge):
         cevap.setdefault("sesli", bool(veri.get("sesli")))
         cevap["cevap_verilen"] = belge.id
         ev_mesaji(cevap)
-    belge.reference.update({"durum": durum})
+    guncelle = {"durum": durum}
+    if veri.get("ses"):
+        guncelle["ses"] = firestore.DELETE_FIELD  # ses kaydı Nest'e gitti; sohbet geçmişini şişirmesin
+    belge.reference.update(guncelle)
 
 def isci():
     while True:
@@ -696,6 +760,7 @@ def kalp_atisi():
     while True:
         try:
             DURUM.document("beyin").set({"son_gorulme": firestore.SERVER_TIMESTAMP, "surum": SURUM})
+            duyuru_zaman_asimi()
         except Exception:  # noqa: BLE001
             log.exception("kalp atışı yazılamadı")
         time.sleep(60)
